@@ -1,9 +1,9 @@
 import numpy as np
-import keras
-from keras import backend as K
+import tensorflow as tf
+import tensorflow.keras as keras
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-import tensorflow as tf
+from keras.utils import np_utils
 
 from utils import load_df_from_hd5
 
@@ -78,14 +78,9 @@ def get_RNN(
     n_classes=340,
     optimizer='adam',
 ):
-    if is_gpu_available():
-        # https://twitter.com/fchollet/status/918170264608817152?lang=en
-        from keras.layers import CuDNNLSTM as LSTM
-    else:
-        from keras.layers import LSTM
-
     inputs = keras.layers.Input(
         shape=(None, n_dims,),
+        name='input_1',
     )
     X = inputs
 
@@ -95,9 +90,9 @@ def get_RNN(
     X = keras.layers.Dropout(dropout)(X)
     X = keras.layers.Conv1D(96, (3,))(X)
     X = keras.layers.Dropout(dropout)(X)
-    X = LSTM(128, return_sequences=True)(X)
+    X = keras.layers.LSTM(128, return_sequences=True)(X)
     X = keras.layers.Dropout(dropout)(X)
-    X = LSTM(128, return_sequences=False)(X)
+    X = keras.layers.LSTM(128, return_sequences=False)(X)
     X = keras.layers.Dropout(dropout)(X)
     X = keras.layers.Dense(512)(X)
     X = keras.layers.Dropout(dropout)(X)
@@ -120,13 +115,14 @@ def get_features(df):
 
 
 def get_targets(df):
-    return keras.utils.np_utils.to_categorical(df.word.values)
+    return np_utils.to_categorical(df.word.values)
 
 
 CV_RANDOM_STATE = 42
 DRAWING_MAX_LENGTH = 64
 BATCH_SIZE = 32
 EPOCHS = 1
+MODEL_DIR = 'model'
 
 
 all_df = load_df_from_hd5()
@@ -145,25 +141,36 @@ train_X, test_X, train_y, test_y = train_test_split(
     random_state=CV_RANDOM_STATE,
 )
 
-K.clear_session()
 with tf.Session() as sess:
-    K.set_session(sess)
 
     model = get_RNN(
         n_dims=train_X.shape[-1],
         n_classes=train_y.shape[-1],
     )
     model.summary()
-    model.fit(
-        train_X,
-        train_y,
-        validation_data=(test_X, test_y),
-        batch_size=BATCH_SIZE,
-        epochs=EPOCHS,
+    estimator = tf.keras.estimator.model_to_estimator(
+        keras_model=model,
+        model_dir=MODEL_DIR,
     )
-    pred = model.predict(
-        test_X,
+    train_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x={"input_1": train_X},
+        y=train_y,
         batch_size=BATCH_SIZE,
+        num_epochs=1,
+        shuffle=False,
     )
-    score = top_3_accuracy(test_y, pred)
-    print('score:', score)
+    estimator.train(
+        input_fn=train_input_fn,
+        steps=int(train_X.shape[0]/BATCH_SIZE*EPOCHS),
+    )
+    test_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x={"input_1": test_X},
+        y=test_y,
+        batch_size=BATCH_SIZE,
+        num_epochs=1,
+        shuffle=False,
+    )
+    scores = estimator.evaluate(
+        input_fn=test_input_fn,
+    )
+    print('score:', scores)
