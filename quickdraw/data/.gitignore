@@ -1,2 +1,4 @@
 *.ndjson
 *.h5
+*.zip
+*.csv*

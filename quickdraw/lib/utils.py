@@ -1,6 +1,7 @@
 import os
 from os import path
 import glob
+import zipfile
 import pandas as pd
 import keras
 
@@ -69,3 +70,36 @@ def is_gpu_available():
 
 def top_3_accuracy(x, y):
     return keras.metrics.top_k_categorical_accuracy(x, y, 3)
+
+
+def shuffle_dataset(
+    input_zip='data/train_simplified.zip',
+    n_splits=20,
+):
+    zip_file = zipfile.ZipFile(input_zip)
+    for file_info in zip_file.infolist():
+        print(f'Processing {file_info.filename}...')
+        with zip_file.open(file_info) as file:
+            df = pd.read_csv(file)
+            df.loc[:, 'hash'] = df.apply(
+                lambda x: hash(tuple(x)),
+                axis='columns',
+            )
+        for idx in range(n_splits):
+            sub_df = df.loc[df.hash % n_splits == idx, :].copy()
+            sub_df.drop(['hash'], axis='columns', inplace=True)
+            file_name = f'data/train_simplified_{idx:04d}.csv.gz'
+            if path.isfile(file_name):
+                sub_df.to_csv(
+                    file_name,
+                    mode='a',
+                    header=False,
+                    compression='gzip',
+                    index=False,
+                )
+            else:
+                sub_df.to_csv(
+                    file_name,
+                    compression='gzip',
+                    index=False,
+                )
