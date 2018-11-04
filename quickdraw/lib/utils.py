@@ -2,6 +2,7 @@ import os
 from os import path
 import glob
 import pandas as pd
+import keras
 
 
 def get_dataset(
@@ -58,3 +59,13 @@ def load_df_from_hd5(
 ):
     df = pd.read_hdf(path, key='df')
     return df
+
+
+def is_gpu_available():
+    from tensorflow.python.client import device_lib
+    local_devices = device_lib.list_local_devices()
+    return len([x.name for x in local_devices if x.device_type == 'GPU']) > 0
+
+
+def top_3_accuracy(x, y):
+    return keras.metrics.top_k_categorical_accuracy(x, y, 3)

@@ -6,6 +6,8 @@ from sklearn.preprocessing import LabelEncoder
 import tensorflow as tf
 
 from utils import load_df_from_hd5
+from utils import top_3_accuracy
+from rnn import RNN
 
 
 def drop_columns(df, col_names=[]):
@@ -62,70 +64,16 @@ def label_decode(encoder, s):
     return encoder.inverse_transform(s.values)
 
 
-def is_gpu_available():
-    from tensorflow.python.client import device_lib
-    local_devices = device_lib.list_local_devices()
-    return len([x.name for x in local_devices if x.device_type == 'GPU']) > 0
-
-
-def top_3_accuracy(x, y):
-    return keras.metrics.top_k_categorical_accuracy(x, y, 3)
-
-
-def get_RNN(
-    n_dims=3,  # x, y, and t
-    dropout=0.3,
-    n_classes=340,
-    optimizer='adam',
-):
-    if is_gpu_available():
-        # https://twitter.com/fchollet/status/918170264608817152?lang=en
-        from keras.layers import CuDNNLSTM as LSTM
-    else:
-        from keras.layers import LSTM
-
-    inputs = keras.layers.Input(
-        shape=(None, n_dims,),
-    )
-    X = inputs
-
-    X = keras.layers.Conv1D(48, (5,))(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = keras.layers.Conv1D(64, (5,))(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = keras.layers.Conv1D(96, (3,))(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = LSTM(128, return_sequences=True)(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = LSTM(128, return_sequences=False)(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = keras.layers.Dense(512)(X)
-    X = keras.layers.Dropout(dropout)(X)
-    X = keras.layers.Dense(n_classes, activation='softmax')(X)
-
-    outputs = X
-
-    model = keras.models.Model(inputs, outputs)
-    model.compile(
-        optimizer=optimizer,
-        loss='categorical_crossentropy',
-        metrics=['categorical_accuracy', top_3_accuracy],
-    )
-
-    return model
-
-
-def get_features(df):
-    return np.stack(df.drawing, 0)
-
-
-def get_targets(df):
-    return keras.utils.np_utils.to_categorical(df.word.values)
-
-
 CV_RANDOM_STATE = 42
+TRAIN_SIZE = None
+VALIDATION_SPLIT = 0.5
+if TRAIN_SIZE is not None:
+    TEST_SIZE = int(np.ceil(TRAIN_SIZE*VALIDATION_SPLIT))
+else:
+    TEST_SIZE = VALIDATION_SPLIT
+
 DRAWING_MAX_LENGTH = 64
-BATCH_SIZE = 32
+BATCH_SIZE = 1024
 EPOCHS = 1
 
 
@@ -138,32 +86,47 @@ all_df.loc[:, 'countrycode'], _ = label_encode(all_df.countrycode)
 all_df.loc[:, 'recognized'], _ = label_encode(all_df.recognized)
 all_df.loc[:, 'word'], word_encoder = label_encode(all_df.word)
 
-train_X, test_X, train_y, test_y = train_test_split(
-    get_features(all_df),
-    get_targets(all_df),
-    test_size=0.1,
-    random_state=CV_RANDOM_STATE,
-)
+n_dims = 3
+n_classes = all_df.word.nunique()
 
 K.clear_session()
 with tf.Session() as sess:
     K.set_session(sess)
 
-    model = get_RNN(
-        n_dims=train_X.shape[-1],
-        n_classes=train_y.shape[-1],
+    rnn = RNN(
+        n_dims=n_dims,
+        n_classes=n_classes,
     )
+
+    train_df, valid_df = train_test_split(
+        all_df,
+        train_size=TRAIN_SIZE,
+        test_size=TEST_SIZE,
+        random_state=CV_RANDOM_STATE,
+    )
+
+    model = rnn.get_model()
     model.summary()
-    model.fit(
-        train_X,
-        train_y,
-        validation_data=(test_X, test_y),
-        batch_size=BATCH_SIZE,
+    model.compile(
+        optimizer='adam',
+        loss='categorical_crossentropy',
+        metrics=['categorical_accuracy', top_3_accuracy],
+    )
+    hist = model.fit_generator(
+        rnn.get_generator(train_df, batch_size=BATCH_SIZE),
+        steps_per_epoch=np.ceil(len(train_df)/BATCH_SIZE),
         epochs=EPOCHS,
+        validation_data=rnn.get_generator(valid_df, batch_size=BATCH_SIZE),
+        validation_steps=np.ceil(len(valid_df)/BATCH_SIZE),
+        callbacks=[
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_categorical_accuracy',
+                factor=0.5,
+                patience=5,
+                min_delta=0.005,
+                mode='max',
+                cooldown=3,
+                verbose=1,
+            ),
+        ],
     )
-    pred = model.predict(
-        test_X,
-        batch_size=BATCH_SIZE,
-    )
-    score = top_3_accuracy(test_y, pred)
-    print('score:', score)
