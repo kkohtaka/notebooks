@@ -1,132 +1,79 @@
+import glob
+
 import numpy as np
-import keras
+import pandas as pd
 from keras import backend as K
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 import tensorflow as tf
 
-from utils import load_df_from_hd5
-from utils import top_3_accuracy
-from rnn import RNN
+from convnet import ConvNet
 
 
-def drop_columns(df, col_names=[]):
-    new_df = df.copy()
-    for col_name in col_names:
-        if col_name in df.columns:
-            new_df.drop([col_name], axis='columns', inplace=True)
-    return new_df
+VALIDATION_SPLIT = 0.1
+BATCH_SIZE = 128
+EPOCHS = 5
 
 
-def count_strokes(df):
-    def _counter(drawing):
-        assert(type(drawing) == list)
-        return len(drawing)
-
-    assert('drawing' in df.columns)
-    df.loc[:, 'strokecount'] = df.drawing.map(_counter)
-    return df
-
-
-def format_drawing(
-    df,
-    maxlen=256,
-):
-    def _parser(drawing):
-        if type(drawing) == np.ndarray and drawing.shape == (maxlen, 3):
-            return drawing
-        assert(type(drawing) == list)
-        data = [
-            (xi, yi, i)
-            for i, (x, y) in enumerate(drawing)
-            for xi, yi in zip(x, y)
-        ]
-        data = np.stack(data)
-        data[:, 2] = [1] + np.diff(data[:, 2]).tolist()
-        data[:, 2] += 1
-        return keras.preprocessing.sequence.pad_sequences(
-            data.swapaxes(0, 1),
-            maxlen=maxlen,
-            padding='post',
-        ).swapaxes(0, 1)
-
-    assert('drawing' in df.columns)
-    df.loc[:, 'drawing'] = df.drawing.map(_parser)
-    return df
+def count_datasets_total(csvs):
+    count = 0
+    for csv in csvs:
+        df = pd.read_csv(csv, usecols=['key_id'])
+        count += len(df)
+        del df
+    return count
 
 
-def label_encode(s):
-    encoder = LabelEncoder()
-    return encoder.fit_transform(s.values), encoder
+def get_encoders(csvs):
+    word_encoder = LabelEncoder()
+    countrycode_encoder = LabelEncoder()
+    for csv in csvs:
+        df = pd.read_csv(csv, usecols=['word', 'countrycode'])
+        df.countrycode.fillna('OTHER', inplace=True)
+        word_encoder.fit(df.word.values)
+        countrycode_encoder.fit(df.countrycode.values)
+        del df
+    return word_encoder, countrycode_encoder
 
 
-def label_decode(encoder, s):
-    return encoder.inverse_transform(s.values)
+csvs = sorted(glob.glob('data/train_simplified_*.csv.gz'))
 
+train_csvs_size = np.floor(len(csvs)*(1.0-VALIDATION_SPLIT)).astype('int')
 
-CV_RANDOM_STATE = 42
-TRAIN_SIZE = None
-VALIDATION_SPLIT = 0.5
-if TRAIN_SIZE is not None:
-    TEST_SIZE = int(np.ceil(TRAIN_SIZE*VALIDATION_SPLIT))
-else:
-    TEST_SIZE = VALIDATION_SPLIT
+assert(train_csvs_size > 0)
+assert(train_csvs_size < len(csvs))
 
-DRAWING_MAX_LENGTH = 64
-BATCH_SIZE = 1024
-EPOCHS = 1
+train_csvs = csvs[:train_csvs_size]
+valid_csvs = csvs[train_csvs_size:]
 
+n_train = count_datasets_total(train_csvs)
+n_valid = count_datasets_total(valid_csvs)
 
-all_df = load_df_from_hd5()
+print(f'# of training set: {n_train}')
+print(f'# of validation set: {n_valid}')
 
-all_df = drop_columns(all_df, ['timestamp', 'key_id'])
-all_df = count_strokes(all_df)
-all_df = format_drawing(all_df, maxlen=DRAWING_MAX_LENGTH)
-all_df.loc[:, 'countrycode'], _ = label_encode(all_df.countrycode)
-all_df.loc[:, 'recognized'], _ = label_encode(all_df.recognized)
-all_df.loc[:, 'word'], word_encoder = label_encode(all_df.word)
+word_encoder, countrycode_encoder = get_encoders(csvs)
 
-n_dims = 3
-n_classes = all_df.word.nunique()
-
-K.clear_session()
 with tf.Session() as sess:
     K.set_session(sess)
 
-    rnn = RNN(
-        n_dims=n_dims,
-        n_classes=n_classes,
+    convnet = ConvNet(
+        word_encoder,
+        countrycode_encoder,
     )
 
-    train_df, valid_df = train_test_split(
-        all_df,
-        train_size=TRAIN_SIZE,
-        test_size=TEST_SIZE,
-        random_state=CV_RANDOM_STATE,
-    )
-
-    model = rnn.get_model()
+    model = convnet.get_model()
     model.summary()
-    model.compile(
-        optimizer='adam',
-        loss='categorical_crossentropy',
-        metrics=['categorical_accuracy', top_3_accuracy],
-    )
     hist = model.fit_generator(
-        rnn.get_generator(train_df, batch_size=BATCH_SIZE),
-        steps_per_epoch=np.ceil(len(train_df)/BATCH_SIZE),
+        convnet.get_generator(
+            train_csvs,
+            batch_size=BATCH_SIZE,
+        ),
+        steps_per_epoch=np.ceil(n_train/BATCH_SIZE).astype('int'),
         epochs=EPOCHS,
-        validation_data=rnn.get_generator(valid_df, batch_size=BATCH_SIZE),
-        validation_steps=np.ceil(len(valid_df)/BATCH_SIZE),
-        callbacks=[
-            keras.callbacks.ReduceLROnPlateau(
-                monitor='val_categorical_accuracy',
-                factor=0.5,
-                patience=5,
-                min_delta=0.005,
-                mode='max',
-                cooldown=3,
-                verbose=1,
-            ),
-        ],
+        validation_data=convnet.get_generator(
+            valid_csvs,
+            batch_size=BATCH_SIZE,
+        ),
+        validation_steps=np.ceil(n_valid/BATCH_SIZE).astype('int'),
+        callbacks=convnet.get_callbacks(),
     )
