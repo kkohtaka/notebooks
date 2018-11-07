@@ -88,7 +88,7 @@ def shuffle_dataset(
         for idx in range(n_splits):
             sub_df = df.loc[df.hash % n_splits == idx, :].copy()
             sub_df.drop(['hash'], axis='columns', inplace=True)
-            file_name = f'data/train_simplified_{idx:04d}.csv.gz'
+            file_name = f'data/train_simplified_{idx+1:04d}.csv.gz'
             if path.isfile(file_name):
                 sub_df.to_csv(
                     file_name,
