@@ -11,20 +11,72 @@ import cv2
 class ConvNet:
     def __init__(
         self,
-        n_classes,
+        word_encoder,
+        countrycode_encoder,
         img_size=64,
-        line_width=6,
+        line_width=3,
         alpha=2.5e-1,
     ):
+        self.n_classes = len(word_encoder.classes_)
+        self.n_countrycodes = len(countrycode_encoder.classes_)
+
+        self.word_encoder = word_encoder
+        self.countrycode_encoder = countrycode_encoder
+
         self.img_size = img_size
-        self.n_classes = n_classes
+        self.line_width = line_width
+        self.alpha = alpha
 
     def get_model(self):
-        model = keras.applications.MobileNet(
+        # TODO(kkohtaka): Use 'imagenet' weights as an initial weights
+        mobile_net = keras.applications.MobileNet(
+            include_top=False,
             input_shape=(self.img_size, self.img_size, 1),
             alpha=1.,
+            # weights="imagenet",
             weights=None,
-            classes=self.num_classes,
+        )
+        # for layer in mobile_net.layers[:-4]:
+        #     layer.trainable = False
+        # for layer in mobile_net.layers:
+        #     print(layer, layer.trainable)
+
+        X_drawing = keras.layers.Flatten(
+            name='flatten_mobilenet',
+        )(mobile_net.output)
+
+        input_countrycode = keras.layers.Input(
+            shape=(self.n_countrycodes,),
+            name='input_countrycode'
+        )
+        X_countrycode = input_countrycode
+
+        input_strokecount = keras.layers.Input(
+            shape=(1,),
+            name='input_strokecount'
+        )
+        X_strokecount = input_strokecount
+
+        X = keras.layers.Concatenate(
+            name='concatenate',
+        )([
+            X_drawing,
+            X_countrycode,
+            X_strokecount,
+        ])
+        X = keras.layers.Dense(512)(X)
+        X = keras.layers.Dropout(0.5, name='dropout_last')(X)
+        X = keras.layers.Dense(self.n_classes, activation='softmax')(X)
+
+        model = keras.models.Model(
+            inputs=(
+                mobile_net.input,
+                input_countrycode,
+                input_strokecount,
+            ),
+            outputs=(
+                X,
+            ),
         )
         model.compile(
             optimizer='adam',
@@ -35,19 +87,34 @@ class ConvNet:
         self.model = model
         return model
 
+    def to_categorical(self, encoder, values):
+        return keras.utils.to_categorical(
+            encoder.transform(values),
+            num_classes=len(encoder.classes_),
+        )
+
     def get_features(self, df):
         df.loc[:, 'drawing'] = df.drawing.apply(ast.literal_eval)
-        X = np.zeros((len(df), self.img_size, self.img_size, 1))
+        df.countrycode.fillna('OTHER', inplace=True)
+        image = np.zeros((len(df), self.img_size, self.img_size, 1))
+        strokecount = np.zeros((len(df), 1))
         for idx, strokes in enumerate(df.drawing.values):
-            X[idx, :, :, 0] = self.generate_image(strokes)
-        X = keras.applications.mobilenet.preprocess_input(X).astype(np.float32)
+            image[idx, :, :, 0] = self.generate_image(strokes)
+            strokecount[idx, :] = np.asarray([len(strokes)])
+        X = {
+            'input_1': keras.applications.mobilenet.preprocess_input(
+                image,
+            ).astype(np.float32),
+            'input_countrycode': self.to_categorical(
+                self.countrycode_encoder,
+                df.countrycode.values,
+            ),
+            'input_strokecount': strokecount,
+        }
         return X
 
     def get_targets(self, df):
-        return keras.utils.to_categorical(
-            df.word,
-            num_classes=self.num_classes,
-        )
+        return self.to_categorical(self.word_encoder, df.word.values)
 
     def get_generator(
         self,
@@ -64,6 +131,19 @@ class ConvNet:
                     else:
                         y = self.get_targets(df)
                         yield X, y
+
+    def get_callbacks(self):
+        return [
+            keras.callbacks.ReduceLROnPlateau(
+                monitor='val_categorical_accuracy',
+                factor=0.5,
+                patience=5,
+                min_delta=0.005,
+                mode='max',
+                cooldown=3,
+                verbose=1,
+            ),
+        ]
 
     def get_score(self, true_y, pred_y):
         return top_3_accuracy(true_y, pred_y)
@@ -84,7 +164,7 @@ class ConvNet:
                     min_y = y
 
         base_size = max(max_x - min_x, max_y - min_y)
-        ratio = float(self.size) / float(base_size)
+        ratio = float(self.img_size) / float(base_size)
 
         line_width = int(self.line_width / ratio)
         base_size += line_width
@@ -100,6 +180,8 @@ class ConvNet:
 
         for t, stroke in enumerate(strokes):
             color = 255 * (1 - self.alpha * np.arctan(t)) / np.pi
+            if color < 1.0:
+                break
             for i in range(len(stroke[0]) - 1):
                 cv2.line(
                     img,
@@ -109,7 +191,7 @@ class ConvNet:
                     line_width,
                 )
 
-        if base_size != self.size:
-            return cv2.resize(img, (self.size, self.size))
+        if base_size != self.img_size:
+            return cv2.resize(img, (self.img_size, self.img_size))
 
         return img
