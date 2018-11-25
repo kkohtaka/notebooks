@@ -1,9 +1,13 @@
 import os
 from os import path
 import glob
+import ast
 import zipfile
+import numpy as np
 import pandas as pd
-import keras
+from tensorflow import keras
+from convnet import generate_image
+from multiprocessing.dummy import Pool as ThreadPool
 
 
 def get_dataset(
@@ -68,38 +72,136 @@ def is_gpu_available():
     return len([x.name for x in local_devices if x.device_type == 'GPU']) > 0
 
 
-def top_3_accuracy(x, y):
-    return keras.metrics.top_k_categorical_accuracy(x, y, 3)
-
-
-def shuffle_dataset(
+def split_dataset(
     input_zip='data/train_simplified.zip',
+    output_base='data/train_simplified',
+    chunksize=1000000,
     n_splits=20,
 ):
     zip_file = zipfile.ZipFile(input_zip)
     for file_info in zip_file.infolist():
         print(f'Processing {file_info.filename}...')
         with zip_file.open(file_info) as file:
-            df = pd.read_csv(file)
-            df.loc[:, 'hash'] = df.apply(
-                lambda x: hash(tuple(x)),
-                axis='columns',
+            for df in pd.read_csv(file, chunksize=chunksize):
+                df.loc[:, 'hash'] = df.apply(
+                    lambda x: hash(tuple(x)),
+                    axis='columns',
+                )
+                for idx in range(n_splits):
+                    sub_df = df.loc[df.hash % n_splits == idx, :].copy()
+                    sub_df.drop(['hash'], axis='columns', inplace=True)
+                    file_name = f'{output_base}_{idx+1:04d}.csv.gz'
+                    if path.isfile(file_name):
+                        sub_df.to_csv(
+                            file_name,
+                            mode='a',
+                            header=False,
+                            compression='gzip',
+                            index=False,
+                        )
+                    else:
+                        sub_df.to_csv(
+                            file_name,
+                            compression='gzip',
+                            index=False,
+                        )
+
+
+def shuffle_dataset(
+    input_csvs=[],
+    random_state=42,
+    output_base='data/train_simplified_shuffled',
+    n_pools=4,
+):
+    def _shuffle_dataset(
+        arg,
+    ):
+        input_csv = arg['input_csv']
+        output_csv = arg['output_csv']
+        pd.read_csv(
+            input_csv,
+        ).sample(
+            frac=1,
+            random_state=random_state,
+        ).to_csv(
+            output_csv,
+            index=False,
+            compression='gzip',
+        )
+    args = []
+    for idx, csv in enumerate(sorted(input_csvs)):
+        args.append(dict(
+            input_csv=csv,
+            output_csv=f'{output_base}_{idx+1:04d}.csv.gz',
+        ))
+    pool = ThreadPool(n_pools)
+    pool.map(_shuffle_dataset, args)
+    pool.close()
+    pool.join()
+
+
+def to_categorical(encoder, values):
+    return keras.utils.to_categorical(
+        encoder.transform(values),
+        num_classes=len(encoder.classes_),
+    )
+
+
+def csv_to_npy(
+    word_encoder,
+    countrycode_encoder,
+    input_csvs=[],
+    img_size=128,
+    line_width=3,
+    alpha=1.0,
+    chunksize=25000,
+    output_base='data/train',
+    n_pools=4,
+):
+    def _csv_to_npy(arg):
+        input_csv = arg['input_csv']
+        output_base = arg['output_base']
+        print(f'Processing {input_csv}...')
+
+        for output_idx, df in enumerate(
+            pd.read_csv(input_csv, chunksize=chunksize),
+        ):
+            output_file = f'{output_base}_{output_idx+1:04d}'
+            print(f'Generating {output_file}...')
+
+            df.loc[:, 'drawing'] = df.drawing.apply(ast.literal_eval)
+            df.countrycode.fillna('OTHER', inplace=True)
+            image = np.zeros((len(df), img_size, img_size, 1))
+            strokecount = np.zeros((len(df), 1))
+            for idx, strokes in enumerate(df.drawing.values):
+                image[idx, :, :, 0] = generate_image(
+                    strokes,
+                    img_size=img_size,
+                    line_width=line_width,
+                    alpha=alpha,
+                )
+                strokecount[idx, :] = np.asarray([len(strokes)])
+            np.savez_compressed(
+                output_file,
+                image=image.astype(np.float32),
+                countrycode=to_categorical(
+                    countrycode_encoder,
+                    df.countrycode.values,
+                ).astype(np.float32),
+                strokecount=strokecount.astype(np.float32),
+                word=to_categorical(
+                    word_encoder,
+                    df.word.values,
+                ).astype(np.float32),
             )
-        for idx in range(n_splits):
-            sub_df = df.loc[df.hash % n_splits == idx, :].copy()
-            sub_df.drop(['hash'], axis='columns', inplace=True)
-            file_name = f'data/train_simplified_{idx+1:04d}.csv.gz'
-            if path.isfile(file_name):
-                sub_df.to_csv(
-                    file_name,
-                    mode='a',
-                    header=False,
-                    compression='gzip',
-                    index=False,
-                )
-            else:
-                sub_df.to_csv(
-                    file_name,
-                    compression='gzip',
-                    index=False,
-                )
+
+    args = []
+    for idx, csv in enumerate(sorted(input_csvs)):
+        args.append(dict(
+            input_csv=csv,
+            output_base=f'{output_base}_{idx+1:04d}',
+        ))
+    pool = ThreadPool(n_pools)
+    pool.map(_csv_to_npy, args)
+    pool.close()
+    pool.join()
