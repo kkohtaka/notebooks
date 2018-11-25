@@ -1,11 +1,69 @@
-from utils import top_3_accuracy
-
 import sys
 import ast
 import numpy as np
 import pandas as pd
 from tensorflow import keras
 import cv2
+
+
+def generate_image(
+    strokes,
+    img_size=128,
+    line_width=3,
+    alpha=1.0,
+):
+    max_x = max_y = 0
+    min_x = min_y = sys.maxsize
+    for t, stroke in enumerate(strokes):
+        for i in range(len(stroke[0])):
+            x, y = stroke[0][i], stroke[1][i]
+            if x > max_x:
+                max_x = x
+            if x < min_x:
+                min_x = x
+            if y > max_y:
+                max_y = y
+            if y < min_y:
+                min_y = y
+
+    base_size = max(max_x - min_x, max_y - min_y)
+    ratio = float(img_size) / float(base_size)
+
+    line_width = int(max(line_width / ratio, 1))
+    base_size = int(base_size + line_width)
+
+    img = np.zeros((base_size, base_size), np.uint8)
+
+    if max_x - min_x > max_y - min_y:
+        x_origin = int(line_width / 2)
+        y_origin = int((line_width + (max_x-min_x) - (max_y-min_y)) / 2)
+    else:
+        x_origin = int((line_width + (max_y-min_y) - (max_x-min_x)) / 2)
+        y_origin = int(line_width / 2)
+
+    for t, stroke in enumerate(strokes):
+        color = 255 * (1 - 2*np.arctan(alpha * t)/np.pi)
+        if color < 1.0:
+            break
+        for i in range(len(stroke[0]) - 1):
+            cv2.line(
+                img,
+                (
+                    int(x_origin + stroke[0][i]),
+                    int(y_origin + stroke[1][i]),
+                ),
+                (
+                    int(x_origin + stroke[0][i+1]),
+                    int(y_origin + stroke[1][i+1]),
+                ),
+                color,
+                line_width,
+            )
+
+    if base_size != img_size:
+        return cv2.resize(img, (img_size, img_size))
+
+    return img
 
 
 class ConvNet:
@@ -81,7 +139,9 @@ class ConvNet:
         model.compile(
             optimizer='adam',
             loss='categorical_crossentropy',
-            metrics=['categorical_accuracy', top_3_accuracy],
+            metrics=[
+                'categorical_accuracy',
+            ],
         )
 
         self.model = model
@@ -145,53 +205,10 @@ class ConvNet:
             ),
         ]
 
-    def get_score(self, true_y, pred_y):
-        return top_3_accuracy(true_y, pred_y)
-
     def generate_image(self, strokes):
-        max_x = max_y = 0
-        min_x = min_y = sys.maxsize
-        for t, stroke in enumerate(strokes):
-            for i in range(len(stroke[0])):
-                x, y = stroke[0][i], stroke[1][i]
-                if x > max_x:
-                    max_x = x
-                if x < min_x:
-                    min_x = x
-                if y > max_y:
-                    max_y = y
-                if y < min_y:
-                    min_y = y
-
-        base_size = max(max_x - min_x, max_y - min_y)
-        ratio = float(self.img_size) / float(base_size)
-
-        line_width = int(self.line_width / ratio)
-        base_size += line_width
-
-        img = np.zeros((base_size, base_size), np.uint8)
-
-        if max_x - min_x > max_y - min_y:
-            x_origin = int(line_width / 2)
-            y_origin = int((line_width + (max_x-min_x) - (max_y-min_y)) / 2)
-        else:
-            x_origin = int((line_width + (max_y-min_y) - (max_x-min_x)) / 2)
-            y_origin = int(line_width / 2)
-
-        for t, stroke in enumerate(strokes):
-            color = 255 * (1 - self.alpha * np.arctan(t)) / np.pi
-            if color < 1.0:
-                break
-            for i in range(len(stroke[0]) - 1):
-                cv2.line(
-                    img,
-                    (x_origin + stroke[0][i],   y_origin + stroke[1][i],),
-                    (x_origin + stroke[0][i+1], y_origin + stroke[1][i+1],),
-                    color,
-                    line_width,
-                )
-
-        if base_size != self.img_size:
-            return cv2.resize(img, (self.img_size, self.img_size))
-
-        return img
+        return generate_image(
+            strokes,
+            self.img_size,
+            self.line_width,
+            self.alpha,
+        )
