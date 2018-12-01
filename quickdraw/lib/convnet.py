@@ -53,7 +53,10 @@ def generate_image(
         x_origin = (line_width + (max_y - min_y) - (max_x - min_x)) / 2
         y_origin = line_width / 2
 
-    for t, stroke in enumerate(strokes):
+    for j in range(len(strokes)):
+        t = len(strokes) - (j + 1)
+        stroke = strokes[t]
+
         color = 255 * (1 - 2*np.arctan(alpha * t)/np.pi)
         if color < 1.0:
             break
