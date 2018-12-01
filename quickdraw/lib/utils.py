@@ -157,6 +157,7 @@ def csv_to_npy(
     chunksize=25000,
     output_base='data/train',
     n_pools=4,
+    overwrite=False,
 ):
     def _csv_to_npy(arg):
         input_csv = arg['input_csv']
@@ -167,6 +168,11 @@ def csv_to_npy(
             pd.read_csv(input_csv, chunksize=chunksize),
         ):
             output_file = f'{output_base}_{output_idx+1:04d}'
+            if not overwrite:
+                if path.isfile(f'{output_file}.npz'):
+                    print(f'Skip generating {output_file}...')
+                    continue
+
             print(f'Generating {output_file}...')
 
             df.loc[:, 'drawing'] = df.drawing.apply(ast.literal_eval)
@@ -189,11 +195,16 @@ def csv_to_npy(
                     df.countrycode.values,
                 ).astype(np.float32),
                 strokecount=strokecount.astype(np.float32),
+                recognized=df.recognized.values.astype(np.float32),
                 word=to_categorical(
                     word_encoder,
                     df.word.values,
                 ).astype(np.float32),
             )
+
+    base_dir = path.dirname(output_base)
+    if not path.isdir(base_dir):
+        os.makedirs(base_dir, exist_ok=True)
 
     args = []
     for idx, csv in enumerate(sorted(input_csvs)):
