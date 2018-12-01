@@ -25,21 +25,33 @@ def generate_image(
                 max_y = y
             if y < min_y:
                 min_y = y
-
-    base_size = max(max_x - min_x, max_y - min_y)
+    base_size = max(max_x-min_x, max_y-min_y)
     ratio = float(img_size) / float(base_size)
 
-    line_width = int(max(line_width / ratio, 1))
-    base_size = int(base_size + line_width)
+    line_width = max(line_width / ratio, 1)
+    base_size = base_size + line_width - 1
 
-    img = np.zeros((base_size, base_size), np.uint8)
+    success = False
+    scale = 1.0
+    while not success:
+        try:
+            img = np.zeros(
+                (
+                    int((base_size + line_width) * scale),
+                    int((base_size + line_width) * scale),
+                ),
+                np.uint8,
+            )
+            success = True
+        except MemoryError:
+            scale *= 0.8
 
-    if max_x - min_x > max_y - min_y:
-        x_origin = int(line_width / 2)
-        y_origin = int((line_width + (max_x-min_x) - (max_y-min_y)) / 2)
+    if (max_x - min_x) > (max_y - min_y):
+        x_origin = line_width / 2
+        y_origin = (line_width + (max_x - min_x) - (max_y - min_y)) / 2
     else:
-        x_origin = int((line_width + (max_y-min_y) - (max_x-min_x)) / 2)
-        y_origin = int(line_width / 2)
+        x_origin = (line_width + (max_y - min_y) - (max_x - min_x)) / 2
+        y_origin = line_width / 2
 
     for t, stroke in enumerate(strokes):
         color = 255 * (1 - 2*np.arctan(alpha * t)/np.pi)
@@ -49,21 +61,18 @@ def generate_image(
             cv2.line(
                 img,
                 (
-                    int(x_origin + stroke[0][i]),
-                    int(y_origin + stroke[1][i]),
+                    int((x_origin + stroke[0][i] - min_x) * scale),
+                    int((y_origin + stroke[1][i] - min_y) * scale),
                 ),
                 (
-                    int(x_origin + stroke[0][i+1]),
-                    int(y_origin + stroke[1][i+1]),
+                    int((x_origin + stroke[0][i+1] - min_x) * scale),
+                    int((y_origin + stroke[1][i+1] - min_y) * scale),
                 ),
                 color,
-                line_width,
+                int(line_width * scale),
             )
 
-    if base_size != img_size:
-        return cv2.resize(img, (img_size, img_size))
-
-    return img
+    return cv2.resize(img, (img_size, img_size))
 
 
 class ConvNet:
