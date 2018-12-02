@@ -53,13 +53,10 @@ def generate_image(
         x_origin = (line_width + (max_y - min_y) - (max_x - min_x)) / 2
         y_origin = line_width / 2
 
-    for j in range(len(strokes)):
-        t = len(strokes) - (j + 1)
-        stroke = strokes[t]
-
+    for t, stroke in reversed(list(enumerate(strokes))):
         color = 255 * (1 - 2*np.arctan(alpha * t)/np.pi)
         if color < 1.0:
-            break
+            continue
         for i in range(len(stroke[0]) - 1):
             cv2.line(
                 img,
